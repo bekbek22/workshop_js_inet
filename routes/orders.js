@@ -2,8 +2,8 @@ const express = require('express');
 const router = express.Router();
 const Order = require('../models/order.model');
 const Product = require('../models/product.model');
+const Cart = require('../models/cart.model')
 const { body, validationResult } = require('express-validator');
-const checkApproval = require('../middleware/checkApproval');
 const {
     authenticate,
     authorize
@@ -206,6 +206,82 @@ router.post(
         status: 500, 
         message: 'ไม่สามารถดำเนินการสั่งซื้อได้' 
       });
+    }
+  }
+);
+
+router.post(
+  '/orders/checkout',
+  authenticate,
+  async (req, res) => {
+    const session = await mongoose.startSession()
+    session.startTransaction();
+
+    try {
+      const userId = req.user._id;
+      const cart = await Cart.findOne({ user: userId })
+        .session(session)
+        .populate('items.product');
+      
+        if (!cart || cart.items.length === 0) {
+          return res.status(400).json({
+            status: 400,
+            message: 'ตระกร้าสินค้าว่างเปล่า'
+          });
+        }
+
+        // ตรวจสอบ stock
+        for ( const item of cart.items) {
+          if (item.product.stock < item.quantity) {
+            throw new Error(`สินค้า ${item.product.name} ไม่เพียงพอ`);
+          }
+        }
+
+        const totalPrice = cart.items.reduce(
+          (sum, item) => sum + (item.quantity * item.price),
+          0
+        );
+
+        // สร้างคำสั่งซื้อ
+        const order = new Order({
+          user: userId,
+          products: cart.items.map(item => ({
+            product: item.product._id,
+            quantity: item.quantity,
+            price: item.price
+          })),
+          total: totalPrice,
+          status: 'pending'
+        })
+
+        await order.save({ session });
+
+        //อัปเดต stock
+        for (const item of cart.items) {
+          item.product.stock -= item.quantity;
+          await item.product.save({ session });
+        }
+
+        //ล้างตระกร้า
+        await Cart.deleteOne({ user: userId })
+          .session(session);
+        
+        await session.commitTransaction();
+
+        res.status(201).json({
+          status: 201,
+          message: 'ซื้อสำเร็จ',
+          data: order
+        });
+
+    } catch (error) {
+      await session.abortTransaction();
+      res.status(500).json({
+        status: 500,
+        message: error.message || 'เกิดข้อผิดพลาดในการสั่งซื้อ'
+      });
+    } finally {
+      session.endSession();
     }
   }
 );

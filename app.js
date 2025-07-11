@@ -10,6 +10,7 @@ var authRouter = require('./routes/auth');
 var adminRouter = require('./routes/admin');
 var productRouter = require('./routes/products');
 var orderRouter = require('./routes/orders')
+var cartRouter = require('./routes/cart');
 
 var app = express();
 
@@ -28,7 +29,7 @@ app.use(express.urlencoded({ extended: false }));
 app.use(cookieParser());
 app.use(express.static(path.join(__dirname, 'public')));
 
-app.use('/api/v1', authRouter, adminRouter, productRouter, orderRouter);
+app.use('/api/v1', authRouter, adminRouter, productRouter, orderRouter, cartRouter);
 
 // catch 404 and forward to error handler
 app.use(function(req, res, next) {

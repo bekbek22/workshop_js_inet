@@ -14,7 +14,16 @@ exports.authenticate = async (req, res, next) => {
         }
 
         const decoded = jwt.verify(token, process.env.JWT_SECRET);
+
+        if (!decoded?.userId) {
+            return res.status(401).json({
+                status: 401,
+                message: 'Invalid token payload'
+            });
+        }
+        console.time("findUser");
         req.user = await userSchema.findById(decoded.userId).select('-password');
+        console.timeEnd("findUser");
 
         if (!req.user) {
             return res.status(401).json({ 
