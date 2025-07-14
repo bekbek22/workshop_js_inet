@@ -286,4 +286,187 @@ router.post(
   }
 );
 
+// อัปเดตคำสั่งซื้อ
+router.patch(
+  '/orders/:id/status',
+  authenticate,
+  authorize('admin'),
+  [
+    body('status').isIn(['pending', 'processing', 'shipped', 'delivered', 'cancelled'])
+    .withMessage('สถานะไม่ถูกต้อง')
+  ],
+  async (req, res) => {
+    const session = await mongoose.startSession();
+    session.startTransaction();
+
+    try {
+      const { id } = req.params;
+      const { status } = req.body;
+
+      // ตรวจสอบ validation
+      const errors = validationResult(req);
+      if (!errors.isEmpty()) {
+        return res.status(400).json({
+          status: 400,
+          message: 'ข้อมูลไม่ถูกต้อง',
+          errors: errors.array()
+        });
+      }
+
+      // ค้นหาคำสั่งซื้อ
+      const order = await Order.findById(id)
+        .session(session)
+        .populate({
+          path: 'products.product',
+          model: 'Product'
+        });
+
+      if (!order) {
+        await session.abortTransaction();
+        return res.status(404).json({
+          status: 404,
+          message: 'ไม่พบคำสั่งซื้อ'
+        });
+      }
+
+      // คัดลอกสถานะเดิมเพื่อตรวจสอบการเปลี่ยนแปลง
+      const originalStatus = order.status;
+
+      //ไม่ต้องทำอะไรหากสถานะเหมือนเดิม
+      if (originalStatus === status) {
+        await session.abortTransaction();
+        return res.status(200).json({
+          status: 200,
+          message: 'สถานะไม่มีการเปลี่ยนแปลง',
+          data: order
+        });
+      }
+
+      // จัดการสต็อกสินค้าตามสถานะ
+      if (status === 'cancelled' && originalStatus !== 'cancelled') {
+        // คืนสต็อกสินค้าเมื่อยกเลิกคำสั่งซื้อ
+        for (const item of order.products) {
+          const product = item.product;
+          // ในกรณียกเลิก เราจะคืนสต็อก ดังนั้นไม่ต้องตรวจสอบ stock ว่าพอไหม แต่ให้คืนได้เลย
+          product.stock += item.quantity;
+          await product.save({ session });
+        }
+      } else if (originalStatus === 'cancelled' && status !== 'cancelled') {
+        // เปลี่ยนจากสถานะ cancelled ไปเป็นสถานะอื่น (เช่น pending, processing, ...)
+        // ต้องหักสต็อกใหม่ และตรวจสอบก่อนว่าสต็อกเพียงพอหรือไม่
+        for (const item of order.products) {
+          const product = item.product;
+          
+          // ตรวจสอบว่าสต็อกสินค้าพอสำหรับจำนวนที่ต้องการหักหรือไม่
+          if (product.stock < item.quantity) {
+            await session.abortTransaction();
+            return res.status(400).json({
+              status: 400,
+              message: `สต็อกสินค้า ${product.name} ไม่เพียงพอ (เหลือ: ${product.stock}, ต้องการ: ${item.quantity})`
+            });
+          }
+          
+          // หักสต็อก
+          product.stock -= item.quantity;
+          await product.save({ session });
+        }
+      }
+
+      // อัปเดตสถานะคำสั่งซื้อ
+      order.status = status;
+      order.updatedAt = new Date();
+      await order.save({ session });
+
+      await session.commitTransaction();
+
+      // ดึงข้อมูลล่าสุดพร้อม populate ใหม่
+      const updatedOrder = await Order.findById(id)
+        .populate('user', 'username email')
+        .populate({
+          path: 'products.product',
+          select: 'name price images'
+        });
+
+      res.status(200).json({
+        status: 200,
+        message: 'อัปเดตสถานะคำสั่งซื้อสำเร็จ',
+        data: updatedOrder
+      });
+
+    } catch (error) {
+      await session.abortTransaction();
+      console.error('เกิดข้อผิดพลาดในการอัปเดตสถานะ:', error);
+      res.status(500).json({
+        status: 500,
+        message: 'เกิดข้อผิดพลาดในการอัปเดตสถานะ',
+        error: error.message
+      })
+    } finally {
+      session.endSession();
+    }
+  }
+)
+
+router.get(
+  '/orders/:orderId',
+  authenticate,
+  async (req, res) => {
+    try {
+      const { orderId } = req.params;
+
+      // ตรวจสอบว่าเป็น ObjectId ที่ถูกต้อง
+      if (!mongoose.Types.ObjectId.isValid(orderId)) {
+        return res.status(400).json({
+          status: 400,
+          message: 'ID คำสั่งซื้อไม่ถูกต้อง'
+        });
+      }
+
+      // สร้าง query เริ่มต้น
+      let query = { _id: orderId };
+
+      // สำหรับผู้ใช้ทั่วไป: เฉพาะคำสั่งซื้อของตัวเอง
+      if (req.user.role === 'user') {
+        query.user = req.user._id;
+      }
+
+      // ดึงข้อมูลคำสั่งซื้อ
+      const order = await Order.findOne(query)
+        .populate('user', 'username email phone')
+        .populate({
+          path: 'products.product',
+          select: 'name price images stock'
+        })
+        .lean();
+
+      if (!order) {
+        return res.status(404).json({
+          status: 404,
+          message: 'ไม่พบคำสั่งซื้อ'
+        });
+      }
+
+      // เพิ่มข้อมูลตะกร้า virtual (ถ้ามีในโมเดล)
+      if (order.products) {
+        order.products = order.products.map(item => ({
+          ...item,
+          total: item.price * item.quantity
+        }));
+      }
+
+      res.status(200).json({
+        status: 200,
+        data: order
+      });
+
+    } catch (error) {
+      console.error('เกิดข้อผิดพลาดในการดึงคำสั่งซื้อ:', error);
+      res.status(500).json({
+        status: 500,
+        message: 'เกิดข้อผิดพลาดในการดึงข้อมูลคำสั่งซื้อ'
+      });
+    }
+  }
+);
+
 module.exports = router;
