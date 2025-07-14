@@ -22,6 +22,7 @@ const productSchema = new Schema({
       min: [0, 'จำนวนสินค้าไม่ถูกต้อง'],
       default: 0
     },
+    images: [String],
     isActive: {
       type: Boolean,
       default: true

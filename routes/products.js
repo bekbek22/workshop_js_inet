@@ -2,6 +2,7 @@ const express = require('express');
 const router = express.Router();
 const Product = require('../models/product.model');
 const { body, validationResult } = require('express-validator');
+const upload = require('../middleware/uploadMiddleware');
 const {
   authenticate,
   authorize
@@ -35,7 +36,7 @@ router.get(
             }
 
             const products = await Product.find(filter)
-                .select('name description price stock isActive')
+                .select('name description price stock images isActive')
                 .sort({ createdAt: -1});
 
             res.json(products);
@@ -97,16 +98,7 @@ router.post(
   '/products',
   authenticate,
   authorize('admin'),
-  [
-    body('name').trim().notEmpty().withMessage('กรุณากรอกชื่อสินค้า'),
-    body('description').trim().notEmpty().withMessage('กรุณากรอกรายละเอียด'),
-    body('price')
-      .isFloat({ gt: 0 })
-      .withMessage('ราคาต้องมากกว่า 0'),
-    body('stock')
-      .isInt({ min: 0 })
-      .withMessage('จำนวนสินค้าต้องมากกว่าหรือเท่ากับ 0')
-  ],
+  upload.array('images'),
   async (req, res) => {
     // ตรวจสอบ Validation
     const errors = validationResult(req);
@@ -119,7 +111,18 @@ router.post(
 
     try {
       // สร้างสินค้าใหม่
-      const product = new Product(req.body);
+      const { name, description, price, stock } = req.body
+
+      const imageFiles = req.files?.map(file => `/images/products/${file.filename}`) || [];
+
+      const product = new Product({
+        name,
+        description,
+        price,
+        stock,
+        images: imageFiles
+      });
+
       await product.save();
 
       res.status(201).json({
@@ -128,6 +131,17 @@ router.post(
         data: product
       });
     } catch (error) {
+      console.error('เกิดข้อผิดพลาดในการสร้างสินค้า:', error);
+
+      //ลบไฟล์ที่อัปโหลดไปแล้วถ้ามี error
+      if (req.files?.length > 0) {
+        req.files.forEach(file => {
+          deleteFile(file.path).catch(err =>
+            console.error('ลบไฟล์ไม่สำเร็จ', file.path, err)
+          );
+        });
+      }
+
       res.status(500).json({
         status: 500,
         message: 'เกิดข้อผิดพลาดในการสร้างสินค้า'
@@ -135,6 +149,17 @@ router.post(
     }
   }
 );
+
+// function ลบไฟล์
+const fs = require('fs').promises;
+const deleteFile = async (filePath) => {
+  try {
+    await fs.unlink(filePath);
+    console.log(`ลบไฟล์สำเร็จ: ${filePath}`);
+  } catch (error) {
+    console.error(`เกิดข้อผิดพลาดในการลบไฟล์ ${filePath}:`, error)
+  }
+}
 
 router.put(
   '/products/:id',
